@@ -8,6 +8,16 @@ rwt is a worktree manager written in zsh which provides easy access to git workt
 - select default agents, pick an agent
 
 
+# install:
+```zsh
+./install.sh
+```
+links `rwt` into `~/.local/bin`. Set `PREFIX` to install somewhere else, for example `PREFIX=/usr/local ./install.sh`.
+The script warns when `zsh`, `git`, or `tmux` is missing, or when the bin directory is not on `PATH`.
+
+For the tmux plugin, add `run-shell /path/to/rwt/rwt.tmux` to `~/.tmux.conf`. The plugin binds `prefix + n` to a popup. Set `set -g @rwt-key 'w'` before that line to change the key.
+
+
 # how it works:
 inside a tmux session use `rwt` in the shell or a shortcut such as `modifier + n` and create the worktree with your agent
 
