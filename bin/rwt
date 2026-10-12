@@ -15,8 +15,26 @@ CFG=(
 
 BRANCH='' BASE='' PLACEMENT='' AGENT='' INTERACTIVE=0
 
+# Styling stays off unless stdout is a terminal and NO_COLOR is unset.
+C_RESET='' C_BOLD='' C_DIM='' C_ACCENT='' C_OK='' C_ERR=''
+setup_colors() {
+  [[ -t 1 && -z ${NO_COLOR:-} ]] || return 0
+  C_RESET='%f%b' C_BOLD='%B' C_DIM='%F{245}' C_ACCENT='%F{81}' C_OK='%F{114}' C_ERR='%F{203}'
+}
+
+# Escapes % so a value prints literally through print -P.
+esc() {
+  print -r -- ${1//\%/%%}
+}
+
 die() {
-  print -u2 -- "rwt: $*"
+  local msg=${(j: :)@}
+  print -P -u2 -- "${C_ERR}rwt${C_RESET} $(esc "$msg")"
+  if (( INTERACTIVE )); then
+    print -nP -u2 -- "  ${C_DIM}press any key to close${C_RESET}"
+    read -rsk1
+    print -u2
+  fi
   exit 1
 }
 
@@ -158,9 +176,9 @@ ensure_worktree() {
   root=$(main_worktree)
   wt_path="${root:h}/${root:t}-worktrees/$branch"
   if git show-ref --verify --quiet "refs/heads/$branch"; then
-    git worktree add "$wt_path" "$branch" >&2
+    git worktree add -q "$wt_path" "$branch" >&2
   else
-    git worktree add -b "$branch" "$wt_path" "$base" >&2
+    git worktree add -q -b "$branch" "$wt_path" "$base" >&2
   fi || die "could not create worktree for $branch"
   print -r -- $wt_path
 }
@@ -201,34 +219,80 @@ open_in_tmux() {
   fi
 }
 
+show_worktrees() {
+  local line wt_path='' branch
+  for line in ${(f)"$(git worktree list --porcelain)"}; do
+    case $line in
+      worktree\ *) wt_path=${line#worktree } ;;
+      branch\ refs/heads/*)
+        branch=${line#branch refs/heads/}
+        print -P -- "    ${C_OK}●${C_RESET} ${C_BOLD}$(esc "$branch")${C_RESET}  ${C_DIM}$(esc "${wt_path/#$HOME/~}")${C_RESET}" ;;
+      detached) print -P -- "    ${C_DIM}○ detached  $(esc "${wt_path/#$HOME/~}")${C_RESET}" ;;
+    esac
+  done
+}
+
+# Prints a dim prompt and sets REPLY to the answer, or to $default when blank.
+ask() {
+  local label=$1 default=$2 reply
+  print -nP -- "  ${C_ACCENT}›${C_RESET} $(esc "$label")"
+  [[ -n $default ]] && print -nP -- " ${C_DIM}[$(esc "$default")]${C_RESET}"
+  print -nP -- ": "
+  read -r reply
+  REPLY=${reply:-$default}
+}
+
+# Asks until the answer is blank (when $default is blank) or a number from 1 to $max.
+pick() {
+  local label=$1 max=$2 default=$3
+  while true; do
+    ask "$label" "$default"
+    [[ -z $REPLY ]] && return 0
+    if [[ $REPLY == <-> ]] && (( REPLY >= 1 && REPLY <= max )); then
+      return 0
+    fi
+    print -P -- "    ${C_ERR}enter a number from 1 to $max${C_RESET}"
+  done
+}
+
+# Prints each argument as a numbered option.
+numbered() {
+  local i=1 label
+  for label in "$@"; do
+    print -P -- "    ${C_ACCENT}${i}${C_RESET}  $(esc "$label")"
+    (( i++ ))
+  done
+}
+
 prompt_choices() {
-  local n i
   local -a which=(${(f)CFG[agents.which]})
+  local -a placements=('new window' 'horizontal split' 'vertical split' 'default split' 'none')
+  local -a placement_values=(window horizontal vertical default '')
 
-  print -- "Existing worktrees:"
-  git worktree list
-  read -r "BRANCH?branch: "
-  read -r "BASE?from [${CFG[worktrees.from]}]: "
+  print -P ''
+  print -P "  ${C_ACCENT}${C_BOLD}rwt${C_RESET}  ${C_DIM}new worktree${C_RESET}"
+  print -P "  ${C_DIM}────────────────────────────────────${C_RESET}"
+  print -P "  ${C_DIM}existing${C_RESET}"
+  show_worktrees
+  print -P ''
 
-  print -- "Placement: 1) new window  2) horizontal split  3) vertical split  4) default split  5) none"
-  read -r "n?choice [1]: "
-  case ${n:-1} in
-    1) PLACEMENT=window ;;
-    2) PLACEMENT=horizontal ;;
-    3) PLACEMENT=vertical ;;
-    4) PLACEMENT=default ;;
-    *) PLACEMENT= ;;
-  esac
+  ask 'branch' ''
+  BRANCH=$REPLY
+  ask 'from' "$CFG[worktrees.from]"
+  BASE=$REPLY
+
+  print -P ''
+  print -P "  ${C_DIM}placement${C_RESET}"
+  numbered "${placements[@]}"
+  pick 'choice' $#placements 1
+  PLACEMENT=${placement_values[REPLY]}
 
   if (( $#which )); then
-    print -- "Agent (blank for the configured default):"
-    for (( i = 1; i <= $#which; i++ )); do
-      print -- "  $i) $which[i]"
-    done
-    read -r "n?agent: "
-    if [[ $n == <-> ]] && (( n >= 1 && n <= $#which )); then
-      AGENT=${which[n]%% *}
-    fi
+    print -P ''
+    print -P "  ${C_DIM}agent${C_RESET}"
+    numbered "${which[@]}"
+    pick 'agent' $#which ''
+    [[ -n $REPLY ]] && AGENT=${which[REPLY]%% *}
   fi
 }
 
@@ -251,13 +315,18 @@ run() {
 
   cmd=$(agent_command "$AGENT") || exit 1
   wt_path=$(ensure_worktree "$BRANCH" "$BASE") || exit 1
-  print -r -- "$wt_path"
+  if (( INTERACTIVE )); then
+    print -P -- "  ${C_OK}✓${C_RESET} ${C_BOLD}$(esc "$BRANCH")${C_RESET}  ${C_DIM}$(esc "${wt_path/#$HOME/~}")${C_RESET}"
+  else
+    print -r -- "$wt_path"
+  fi
 
   [[ -n $PLACEMENT ]] || return 0
   open_in_tmux "$PLACEMENT" "$wt_path" "$BRANCH" "$cmd"
 }
 
 main() {
+  setup_colors
   parse_args "$@"
   require_repo
   load_config "${XDG_CONFIG_HOME:-$HOME/.config}/rwt/rwt.toml"
