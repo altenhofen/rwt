@@ -41,6 +41,7 @@ See how the order of arguments does not change the program behaviour.
 
 # conf file:
 **globally:** $XDG_CONFIG_HOME/rwt/rwt.toml
+
 **per repo:** .rwt.toml
 
 ## syntax
