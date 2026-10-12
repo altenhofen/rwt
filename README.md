@@ -4,7 +4,7 @@ rwt is a worktree manager written in zsh which provides easy access to git workt
 
 # features:
 - configure point  of start for worktree, be it HEAD, origin/develop, origin/master, etc
-- create or select an existing worktree in a split, or new pane
+- create or select an existing worktree in a split, or new window
 - select default agents, pick an agent
 
 
@@ -15,16 +15,16 @@ inside a tmux session use `rwt` in the shell or a shortcut such as `modifier + n
 # shell syntax:
 ## create new worktree from configured base:
 ```zsh
-rwt [--to] feat/context-boundaries -p [--from] HEAD
+rwt [--to] feat/context-boundaries -w [--from] HEAD
 ```
 ## create new worktree from configured base in a horizontal split from origin/develop:
 ```zsh
 rwt [--to] feat/context-boundaries [--from] origin/develop -hs
 ```
 
-## create new worktree from configured base in a pane from master and open claude code:
+## create new worktree from configured base in a window from master and open claude code:
 ```zsh
-rwt feat/context-boundaries master -p -a claude
+rwt feat/context-boundaries master -w -a claude
 ```
 Can also be expanded to:
 ```
@@ -62,5 +62,5 @@ default_split = "vertical" # affects `-s` flag
 
 # tmux plugin:
 tmux plugin provides a visual creation of worktrees (names) and macros for
-creating worktrees in new panes, horizontal/veritcal splits, selecting agents,
+creating worktrees in new windows, horizontal/veritcal splits, selecting agents,
 etc.
