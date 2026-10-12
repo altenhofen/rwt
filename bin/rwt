@@ -1,0 +1,273 @@
+#!/usr/bin/env zsh
+# Creates or selects a git worktree and opens it in a tmux window or split.
+emulate -L zsh
+setopt extended_glob
+
+# Flat config keyed `section.key`. Global config loads first, then .rwt.toml overrides it.
+typeset -A CFG
+CFG=(
+  agents.which ''
+  agents.auto_open false
+  agents.default ''
+  worktrees.from HEAD
+  tmux.default_split vertical
+)
+
+BRANCH='' BASE='' PLACEMENT='' AGENT='' INTERACTIVE=0
+
+die() {
+  print -u2 -- "rwt: $*"
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+usage: rwt [-t|--to] <branch> [-f|--from <base>] [-w|-hs|-vs|-s] [-a|--agent <name>]
+       rwt --interactive
+
+  -w,  --window            open the worktree in a new tmux window
+  -hs, --horizontal-split  split the current window horizontally
+  -vs, --vertical-split    split the current window vertically
+  -s,  --split             split using [tmux] default_split
+  -a,  --agent <name>      start this agent in the new pane
+  --interactive            prompt for each choice (used by the tmux plugin)
+EOF
+}
+
+trim() {
+  local s=$1
+  s=${s##[[:space:]]#}
+  s=${s%%[[:space:]]#}
+  print -r -- $s
+}
+
+# Drops a trailing `# comment`, ignoring any `#` inside double quotes.
+strip_comment() {
+  local s=$1 out='' ch quoted=0 i
+  for (( i = 1; i <= ${#s}; i++ )); do
+    ch=${s[i]}
+    [[ $ch == '"' ]] && (( quoted = !quoted ))
+    [[ $ch == '#' ]] && (( ! quoted )) && break
+    out+=$ch
+  done
+  print -r -- $out
+}
+
+# Reads the TOML subset rwt uses: [section], key = "string", key = bool, key = ["a", "b"].
+load_config() {
+  local file=$1 line section='' key value item
+  local -a items out
+  [[ -r $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=$(trim "$(strip_comment "$line")")
+    [[ -n $line ]] || continue
+    if [[ $line == \[*\] ]]; then
+      section=${line#\[}
+      section=$(trim "${section%\]}")
+    elif [[ $line == *=* ]]; then
+      key=$(trim "${line%%=*}")
+      value=$(trim "${line#*=}")
+      if [[ $value == \[*\] ]]; then
+        value=${value#\[}
+        value=${value%\]}
+        items=(${(s:,:)value})
+        out=()
+        for item in $items; do
+          item=$(trim "$item")
+          item=${item#\"}
+          item=${item%\"}
+          [[ -n $item ]] && out+=$item
+        done
+        value=${(F)out}
+      elif [[ $value == \"*\" ]]; then
+        value=${value#\"}
+        value=${value%\"}
+      fi
+      CFG[$section.$key]=$value
+    fi
+  done < "$file"
+}
+
+need() {
+  [[ -n ${2:-} ]] || die "$1 needs a value"
+}
+
+set_placement() {
+  [[ -z $PLACEMENT || $PLACEMENT == $1 ]] || die "choose one of -w, -hs, -vs, -s"
+  PLACEMENT=$1
+}
+
+parse_args() {
+  local -a positional
+  while (( $# )); do
+    case $1 in
+      -t|--to) need "$1" "$2"; BRANCH=$2; shift ;;
+      -f|--from) need "$1" "$2"; BASE=$2; shift ;;
+      -a|--agent) need "$1" "$2"; AGENT=$2; shift ;;
+      -w|--window) set_placement window ;;
+      -hs|--horizontal-split) set_placement horizontal ;;
+      -vs|--vertical-split) set_placement vertical ;;
+      -s|--split) set_placement default ;;
+      --interactive) INTERACTIVE=1 ;;
+      -h|--help) usage; exit 0 ;;
+      --) shift; positional+=("$@"); break ;;
+      -*) die "unknown flag: $1" ;;
+      *) positional+=("$1") ;;
+    esac
+    shift
+  done
+
+  if [[ -z $BRANCH ]] && (( $#positional )); then
+    BRANCH=$positional[1]
+    positional=("${(@)positional[2,-1]}")
+  fi
+  if [[ -z $BASE ]] && (( $#positional )); then
+    BASE=$positional[1]
+    positional=("${(@)positional[2,-1]}")
+  fi
+  (( $#positional == 0 )) || die "unexpected argument: $positional[1]"
+}
+
+require_repo() {
+  git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+}
+
+main_worktree() {
+  local -a lines=(${(f)"$(git worktree list --porcelain)"})
+  print -r -- ${lines[1]#worktree }
+}
+
+# Prints the path of the worktree that already has $1 checked out, if any.
+existing_worktree() {
+  local branch=$1 line wt_path=''
+  for line in ${(f)"$(git worktree list --porcelain)"}; do
+    case $line in
+      worktree\ *) wt_path=${line#worktree } ;;
+      "branch refs/heads/$branch") print -r -- $wt_path; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+ensure_worktree() {
+  local branch=$1 base=$2 root wt_path
+  if wt_path=$(existing_worktree "$branch"); then
+    print -r -- $wt_path
+    return 0
+  fi
+  root=$(main_worktree)
+  wt_path="${root:h}/${root:t}-worktrees/$branch"
+  if git show-ref --verify --quiet "refs/heads/$branch"; then
+    git worktree add "$wt_path" "$branch" >&2
+  else
+    git worktree add -b "$branch" "$wt_path" "$base" >&2
+  fi || die "could not create worktree for $branch"
+  print -r -- $wt_path
+}
+
+# Prints the agent command to run, or nothing when no agent applies.
+agent_command() {
+  local name=$1 entry
+  local -a which=(${(f)CFG[agents.which]})
+  if [[ -z $name ]]; then
+    [[ $CFG[agents.auto_open] == true ]] || return 0
+    name=$CFG[agents.default]
+    [[ -n $name ]] || return 0
+  fi
+  if (( ! $#which )); then
+    print -r -- $name
+    return 0
+  fi
+  for entry in $which; do
+    if [[ ${entry%% *} == "$name" ]]; then
+      print -r -- $entry
+      return 0
+    fi
+  done
+  die "agent '$name' is not listed in [agents] which"
+}
+
+open_in_tmux() {
+  local placement=$1 wt_path=$2 name=$3 cmd=$4 pane session
+  case $placement in
+    window)
+      session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}')
+      pane=$(tmux new-window -t "$session:" -P -F '#{pane_id}' -c "$wt_path" -n "$name") ;;
+    horizontal) pane=$(tmux split-window -t "$TMUX_PANE" -v -P -F '#{pane_id}' -c "$wt_path") ;;
+    vertical) pane=$(tmux split-window -t "$TMUX_PANE" -h -P -F '#{pane_id}' -c "$wt_path") ;;
+  esac || die "tmux could not open a $placement for $name"
+  if [[ -n $cmd ]]; then
+    tmux send-keys -t "$pane" "$cmd" Enter
+  fi
+}
+
+prompt_choices() {
+  local n i
+  local -a which=(${(f)CFG[agents.which]})
+
+  print -- "Existing worktrees:"
+  git worktree list
+  read -r "BRANCH?branch: "
+  read -r "BASE?from [${CFG[worktrees.from]}]: "
+
+  print -- "Placement: 1) new window  2) horizontal split  3) vertical split  4) default split  5) none"
+  read -r "n?choice [1]: "
+  case ${n:-1} in
+    1) PLACEMENT=window ;;
+    2) PLACEMENT=horizontal ;;
+    3) PLACEMENT=vertical ;;
+    4) PLACEMENT=default ;;
+    *) PLACEMENT= ;;
+  esac
+
+  if (( $#which )); then
+    print -- "Agent (blank for the configured default):"
+    for (( i = 1; i <= $#which; i++ )); do
+      print -- "  $i) $which[i]"
+    done
+    read -r "n?agent: "
+    if [[ $n == <-> ]] && (( n >= 1 && n <= $#which )); then
+      AGENT=${which[n]%% *}
+    fi
+  fi
+}
+
+run() {
+  local wt_path cmd
+
+  if [[ $PLACEMENT == default ]]; then
+    PLACEMENT=$CFG[tmux.default_split]
+  fi
+  case $PLACEMENT in
+    ''|window|horizontal|vertical) ;;
+    *) die "[tmux] default_split must be horizontal or vertical" ;;
+  esac
+  if [[ -n $PLACEMENT && -z $TMUX ]]; then
+    die "$PLACEMENT needs to run inside tmux"
+  fi
+  if [[ -n $AGENT && -z $PLACEMENT ]]; then
+    die "-a needs a placement: -w, -hs, -vs or -s"
+  fi
+
+  cmd=$(agent_command "$AGENT") || exit 1
+  wt_path=$(ensure_worktree "$BRANCH" "$BASE") || exit 1
+  print -r -- "$wt_path"
+
+  [[ -n $PLACEMENT ]] || return 0
+  open_in_tmux "$PLACEMENT" "$wt_path" "$BRANCH" "$cmd"
+}
+
+main() {
+  parse_args "$@"
+  require_repo
+  load_config "${XDG_CONFIG_HOME:-$HOME/.config}/rwt/rwt.toml"
+  load_config "$(git rev-parse --show-toplevel)/.rwt.toml"
+  if (( INTERACTIVE )); then
+    prompt_choices
+  fi
+  [[ -n $BRANCH ]] || die "a branch name is required (see rwt --help)"
+  BASE=${BASE:-$CFG[worktrees.from]}
+  run
+}
+
+main "$@"
