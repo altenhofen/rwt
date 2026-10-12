@@ -47,7 +47,7 @@ See how the order of arguments does not change the program behaviour.
 ```toml
 [agents]
 which = ["claude", "codex --yolo", "cursor-agent", "opencode"]
-auto_open: true
+auto_open = true
 default = "claude"
 
 
