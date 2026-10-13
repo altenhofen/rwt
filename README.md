@@ -36,6 +36,14 @@ rwt [--to] feat/context-boundaries [--from] origin/develop -hs
 ```zsh
 rwt feat/context-boundaries master -w -a claude
 ```
+Use `$` in a branch argument to generate a token. Quote the argument so your shell passes the dollar sign to `rwt`:
+
+```zsh
+rwt 'feat/otel-$'
+```
+
+`rwt` replaces each `$` with an eight-character alphanumeric token from six random bytes encoded with OpenSSL Base64. Interactive branch input uses the same rule.
+
 Can also be expanded to:
 ```
 -a|--agent
