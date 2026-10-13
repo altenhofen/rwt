@@ -150,6 +150,29 @@ require_repo() {
   git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
 }
 
+branch_token() {
+  local sample attempt
+  for (( attempt = 1; attempt <= 32; attempt++ )); do
+    sample=$(openssl rand -base64 6 2>/dev/null) || return 1
+    if (( ${#sample} == 8 )) && [[ $sample != *[^A-Za-z0-9]* ]]; then
+      print -r -- "$sample"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_branch_template() {
+  local template=$1 token resolved=''
+  command -v openssl >/dev/null 2>&1 || return 1
+  while [[ $template == *'$'* ]]; do
+    token=$(branch_token) || return 1
+    resolved+="${template%%\$*}$token"
+    template=${template#*\$}
+  done
+  print -r -- "$resolved$template"
+}
+
 main_worktree() {
   local -a lines=(${(f)"$(git worktree list --porcelain)"})
   print -r -- ${lines[1]#worktree }
@@ -335,6 +358,9 @@ main() {
     prompt_choices
   fi
   [[ -n $BRANCH ]] || die "a branch name is required (see rwt --help)"
+  if [[ $BRANCH == *'$'* ]]; then
+    BRANCH=$(resolve_branch_template "$BRANCH") || die "could not generate a branch token"
+  fi
   BASE=${BASE:-$CFG[worktrees.from]}
   run
 }
